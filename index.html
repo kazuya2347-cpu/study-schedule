@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="theme-color" content="#fb923c" />
+  <title>やまのぼり学習スケジュール</title>
+
+  <!-- React / ReactDOM / Babel (CDN・ビルド不要) -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Tailwind (Play CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'] }
+        }
+      }
+    }
+  </script>
+  <style>
+    html, body { overscroll-behavior-y: none; }
+    /* タイマーのモノスペース感 */
+    .tabnum { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body class="bg-orange-50 text-slate-800">
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useMemo } = React;
+
+/* =========================================================================
+ *  定数・マスタデータ（仕様書の学習ブロックマスタ）
+ *  ※ 「漢字(時間任意)」「1単元項番入力」は可変だが、MVPでは仮の分数を入れて
+ *     スケジュール配置時に変更できるようにする（confirmed: #6）
+ * ========================================================================= */
+const STUDY_MASTER = [
+  { cat: '英語',   items: [
+    { name: '長文',       min: 60 },
+    { name: '音読',       min: 30 },
+    { name: '単語',       min: 30 },
+    { name: '文法',       min: 30 },
+    { name: '英文解釈',   min: 10 },
+  ]},
+  { cat: '世界史', items: [
+    { name: '1単元項番入力', min: 90 },
+    { name: '茂木誠',        min: 30 },
+    { name: '時代と流れ',    min: 30 },
+    { name: '一問一答',      min: 30 },
+    { name: '一問一答復習',  min: 30 },
+  ]},
+  { cat: '古文',   items: [
+    { name: '読解/精読',   min: 20 },
+    { name: '読解/演習',   min: 50 },
+    { name: '文法・単語',  min: 20 },
+  ]},
+  { cat: '現代文', items: [
+    { name: '要約',   min: 20 },
+    { name: '読解',   min: 60 },
+    { name: '漢字',   min: 30 }, // 時間任意 → 仮30分
+  ]},
+];
+const REST_MASTER = [10, 20, 30, 50, 60];
+
+// セットメニュー（仮置き・confirmed #10。設定から「現在の並びを保存」で上書き可）
+const DEFAULT_SETMENUS = {
+  '平日通常':   [ {t:'study',c:'英語',n:'単語'}, {t:'rest',m:10}, {t:'study',c:'英語',n:'文法'}, {t:'rest',m:10}, {t:'study',c:'世界史',n:'一問一答'}, {t:'rest',m:20}, {t:'study',c:'古文',n:'文法・単語'} ],
+  '英検重視':   [ {t:'study',c:'英語',n:'長文'}, {t:'rest',m:10}, {t:'study',c:'英語',n:'英文解釈'}, {t:'rest',m:10}, {t:'study',c:'英語',n:'音読'}, {t:'rest',m:20}, {t:'study',c:'英語',n:'単語'} ],
+  '英語重視':   [ {t:'study',c:'英語',n:'長文'}, {t:'rest',m:10}, {t:'study',c:'英語',n:'文法'}, {t:'rest',m:10}, {t:'study',c:'英語',n:'音読'}, {t:'rest',m:20}, {t:'study',c:'世界史',n:'一問一答'} ],
+  '世界史重視': [ {t:'study',c:'世界史',n:'1単元項番入力'}, {t:'rest',m:20}, {t:'study',c:'世界史',n:'時代と流れ'}, {t:'rest',m:10}, {t:'study',c:'世界史',n:'一問一答'}, {t:'rest',m:10}, {t:'study',c:'英語',n:'単語'} ],
+};
+
+const CAT_COLOR = {
+  '英語':   'bg-blue-100 text-blue-700 border-blue-200',
+  '世界史': 'bg-amber-100 text-amber-700 border-amber-200',
+  '古文':   'bg-emerald-100 text-emerald-700 border-emerald-200',
+  '現代文': 'bg-rose-100 text-rose-700 border-rose-200',
+  '休憩':   'bg-slate-100 text-slate-500 border-slate-200',
+  '固定':   'bg-purple-100 text-purple-700 border-purple-200',
+};
+
+// 1日の自己評価後の定型フィードバック（confirmed #4：APIなしでランダム表示）
+const FEEDBACKS = [
+  'おつかれさま！今日のキミ、なかなかやるじゃないか。',
+  'よく登った。山頂が少し近づいたぞ⛰️',
+  '休むのも実力のうち。明日また登ろう。',
+  '積み上げは裏切らない。今日の一歩は確かな一歩だ。',
+  'さぼった日があってもいい。続けてるのが偉い。',
+  'その調子。未来のキミが感謝してる。',
+  '今日も机に向かえた時点で勝ち。えらい。',
+  'ちりも積もれば山となる。文字通りだな。',
+];
+
+/* =========================================================================
+ *  時間ユーティリティ（すべて「0:00からの分」で扱う。深夜は >1440 もありうる）
+ * ========================================================================= */
+const pad = (n) => String(n).padStart(2, '0');
+// 分 → "H:MM"（25:00 のように24超も表示＝深夜2時を25時表記で。受験生の感覚に合わせる）
+const minToHHMM = (min) => `${Math.floor(min / 60)}:${pad(min % 60)}`;
+// "HH:MM" → 分
+const hhmmToMin = (s) => {
+  const [h, m] = s.split(':').map(Number);
+  return h * 60 + m;
+};
+
+// 現在の「論理的な今日」と、その日のフレーム内での現在時刻(分)を返す
+// confirmed #11: リミットを超えたら翌日扱い → 深夜は前日の延長フレームに属する
+function getLogicalNow(limitMin) {
+  const d = new Date();
+  let mins = d.getHours() * 60 + d.getMinutes();
+  const overhang = Math.max(0, limitMin - 1440); // 26:00 なら 120
+  let date = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  let nowInFrame = mins;
+  if (mins < overhang) {
+    // まだ前日の延長戦（例: limit 26:00 で現在 1:00 → 前日の25:00）
+    date.setDate(date.getDate() - 1);
+    nowInFrame = mins + 1440;
+  }
+  const dateStr = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return { dateStr, nowInFrame };
+}
+
+/* =========================================================================
+ *  スケジュール投影ロジック（コア）
+ *  - done    : actualStart/actualEnd（実績）を使う
+ *  - active  : actualStart から planned 分で投影
+ *  - pending : カーソル位置（=直前の終わり）と「現在時刻」の遅い方から流す
+ *              → 早く終われば前詰め、遅れれば後ろにスライド（confirmed #3）
+ *  - 固定ブロック(fixed)は絶対時刻。pendingが重なるなら固定の後ろへ回避（#7）
+ *  - リミット: 開始>=limit → 消滅 / 終了>limit → 短縮（#2,#5）
+ * ========================================================================= */
+function projectSchedule(tasks, dayStartMin, limitMin, nowInFrame) {
+  // 固定ブロックの占有区間
+  const fixedIntervals = tasks
+    .filter((t) => t.type === 'fixed')
+    .map((t) => ({ start: t.fixedStart, end: t.fixedEnd }))
+    .sort((a, b) => a.start - b.start);
+
+  // [start, start+dur) が固定区間に重なるなら、その固定の終わりへ押し出す
+  const avoidFixed = (start, dur) => {
+    let s = start;
+    let moved = true;
+    while (moved) {
+      moved = false;
+      for (const f of fixedIntervals) {
+        if (s < f.end && s + dur > f.start) { // 重なり
+          s = f.end;
+          moved = true;
+        }
+      }
+    }
+    return s;
+  };
+
+  let cursor = dayStartMin;
+  const result = [];
+
+  for (const t of tasks) {
+    const dur = t.actualMin != null && t.status === 'done' ? t.actualMin : t.plannedMin;
+
+    if (t.type === 'fixed') {
+      result.push({ ...t, projStart: t.fixedStart, projEnd: t.fixedEnd, vanished: false, cut: false });
+      cursor = Math.max(cursor, t.fixedEnd);
+      continue;
+    }
+
+    if (t.status === 'done') {
+      const s = t.actualStart != null ? t.actualStart : cursor;
+      const e = t.actualEnd != null ? t.actualEnd : s + dur;
+      result.push({ ...t, projStart: s, projEnd: e, vanished: false, cut: false });
+      cursor = Math.max(cursor, e);
+      continue;
+    }
+
+    if (t.status === 'active') {
+      const s = t.actualStart != null ? t.actualStart : cursor;
+      const e = s + t.plannedMin;
+      result.push({ ...t, projStart: s, projEnd: e, vanished: false, cut: false });
+      cursor = Math.max(cursor, e);
+      continue;
+    }
+
+    // pending
+    let start = avoidFixed(Math.max(cursor, nowInFrame), t.plannedMin);
+    let end = start + t.plannedMin;
+    let vanished = false;
+    let cut = false;
+
+    if (start >= limitMin) {
+      vanished = true; // 消滅（開始がリミットを越えた）
+      result.push({ ...t, projStart: start, projEnd: end, vanished, cut });
+      // 消滅タスクはカーソルを進めない
+      continue;
+    }
+    if (end > limitMin) {
+      end = limitMin; // 短縮
+      cut = true;
+    }
+    result.push({ ...t, projStart: start, projEnd: end, vanished, cut });
+    cursor = end;
+  }
+  return result;
+}
+
+/* =========================================================================
+ *  永続化
+ * ========================================================================= */
+const LS_KEY = 'yamanobori_v1';
+function loadState() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY)) || {}; }
+  catch { return {}; }
+}
+function saveState(s) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch {}
+}
+
+let _idc = 0;
+const newId = () => `${Date.now()}_${_idc++}`;
+
+/* =========================================================================
+ *  タスク生成ヘルパー
+ * ========================================================================= */
+function makeStudyTask(cat, name, min) {
+  return { id: newId(), type: 'study', cat, name, plannedMin: min, status: 'pending',
+           actualStart: null, actualEnd: null, actualMin: null };
+}
+function makeRestTask(min) {
+  return { id: newId(), type: 'rest', cat: '休憩', name: `休憩 ${min}分`, plannedMin: min,
+           status: 'pending', actualStart: null, actualEnd: null, actualMin: null };
+}
+function makeFixedTask(name, startMin, endMin) {
+  return { id: newId(), type: 'fixed', cat: '固定', name, plannedMin: endMin - startMin,
+           fixedStart: startMin, fixedEnd: endMin, status: 'pending',
+           actualStart: null, actualEnd: null, actualMin: null };
+}
+function expandSetMenu(def) {
+  return def.map((d) => {
+    if (d.t === 'rest') return makeRestTask(d.m);
+    const grp = STUDY_MASTER.find((g) => g.cat === d.c);
+    const it = grp && grp.items.find((i) => i.name === d.n);
+    return makeStudyTask(d.c, d.n, it ? it.min : 30);
+  });
+}
+
+/* =========================================================================
+ *  アプリ本体
+ * ========================================================================= */
+function App() {
+  const persisted = loadState();
+  const [settings, setSettings] = useState(persisted.settings || { limit: '24:00', dayStart: '6:00' });
+  const [setmenus, setSetmenus] = useState(persisted.setmenus || DEFAULT_SETMENUS);
+  const [days, setDays] = useState(persisted.days || {}); // { dateStr: { tasks, evaluation } }
+
+  const limitMin = hhmmToMin(settings.limit);
+  const dayStartMin = hhmmToMin(settings.dayStart);
+
+  // 毎秒更新（タイマー・投影の再計算用）
+  const [, force] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => force((x) => x + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const { dateStr, nowInFrame } = getLogicalNow(limitMin);
+  const today = days[dateStr] || { tasks: [], evaluation: null };
+
+  // 永続化
+  useEffect(() => { saveState({ settings, setmenus, days }); }, [settings, setmenus, days]);
+
+  // モーダル
+  const [modal, setModal] = useState(null); // 'add' | 'set' | 'settings' | 'eval' | {edit:task}
+
+  /* ---- タスク操作 ---- */
+  const updateToday = (mut) => {
+    setDays((prev) => {
+      const cur = prev[dateStr] || { tasks: [], evaluation: null };
+      const next = mut({ ...cur, tasks: [...cur.tasks] });
+      return { ...prev, [dateStr]: next };
+    });
+  };
+  const addTasks = (arr) => updateToday((d) => ({ ...d, tasks: [...d.tasks, ...arr] }));
+  const removeTask = (id) => updateToday((d) => ({ ...d, tasks: d.tasks.filter((t) => t.id !== id) }));
+  const replaceTask = (id, patch) =>
+    updateToday((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }));
+  const clearDay = () => { if (confirm('今日の予定をすべて消去しますか？')) updateToday(() => ({ tasks: [], evaluation: null })); };
+
+  const startTask = (id) => {
+    // 同時に動かせるタイマーは1つ（confirmed #12）
+    const active = today.tasks.find((t) => t.status === 'active');
+    if (active && active.id !== id) { alert('別のタスクが進行中です。先に終了してください。'); return; }
+    replaceTask(id, { status: 'active', actualStart: nowInFrame, actualEnd: null });
+  };
+  const stopTask = (id) => {
+    const t = today.tasks.find((x) => x.id === id);
+    const dur = Math.max(1, Math.round(nowInFrame - (t.actualStart ?? nowInFrame)));
+    replaceTask(id, { status: 'done', actualEnd: nowInFrame, actualMin: dur });
+  };
+
+  /* ---- 投影 ---- */
+  const projected = useMemo(
+    () => projectSchedule(today.tasks, dayStartMin, limitMin, nowInFrame),
+    [today.tasks, dayStartMin, limitMin, nowInFrame]
+  );
+  const active   = projected.find((t) => t.status === 'active');
+  const pending  = projected.filter((t) => t.status === 'pending' && !t.vanished);
+  const vanished = projected.filter((t) => t.vanished);
+  const done     = projected.filter((t) => t.status === 'done');
+  const nextUp   = pending[0];
+
+  // 実績合計（分）
+  const doneMin = done.reduce((a, t) => a + (t.actualMin || 0), 0);
+
+  return (
+    <div className="max-w-md mx-auto min-h-screen flex flex-col">
+      {/* ヘッダー */}
+      <header className="px-4 pt-4 pb-2 sticky top-0 bg-orange-50/90 backdrop-blur z-10">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-xs text-slate-500">{dateStr}（{['日','月','火','水','木','金','土'][new Date(dateStr).getDay()]}）</div>
+            <div className="text-2xl font-bold tabnum">{minToHHMM(Math.floor(nowInFrame))}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-xs text-slate-500">今日の実績</div>
+            <div className="text-lg font-bold text-orange-600 tabnum">{Math.floor(doneMin / 60)}時間{doneMin % 60}分</div>
+            <button onClick={() => setModal('settings')} className="text-xs text-slate-400 underline mt-0.5">⚙ 設定</button>
+          </div>
+        </div>
+        {/* 簡易・山のぼり進捗バー（実績/その日のpending+done予定の比率） */}
+        <ProgressBar done={done.length} total={done.length + pending.length} />
+      </header>
+
+      <main className="flex-1 px-4 pb-28 space-y-4">
+        {/* 進行中タスク */}
+        {active && (
+          <ActiveCard task={active} nowInFrame={nowInFrame} onStop={() => stopTask(active.id)} onEdit={() => setModal({ edit: active })} />
+        )}
+
+        {/* 次にやること */}
+        {!active && nextUp && (
+          <div>
+            <div className="text-xs font-semibold text-slate-400 mb-1">▶ 今やること</div>
+            <NextCard task={nextUp} onStart={() => startTask(nextUp.id)} onEdit={() => setModal({ edit: nextUp })} onRemove={() => removeTask(nextUp.id)} />
+          </div>
+        )}
+
+        {/* 残りのスケジュール（confirmed #1: 全タスクをコンパクトに一覧） */}
+        {pending.length > (active ? 0 : 1) && (
+          <div>
+            <div className="text-xs font-semibold text-slate-400 mb-1">残りの予定（{pending.length - (active ? 0 : 1)}件）</div>
+            <div className="space-y-1">
+              {pending.slice(active ? 0 : 1).map((t) => (
+                <CompactRow key={t.id} task={t} onEdit={() => setModal({ edit: t })} onRemove={() => removeTask(t.id)} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 消滅タスク（当日限り表示・confirmed #5） */}
+        {vanished.length > 0 && (
+          <Collapsible title={`💨 リミット超過で消滅（${vanished.length}件）`} color="text-slate-400">
+            {vanished.map((t) => (
+              <div key={t.id} className="flex items-center justify-between text-sm text-slate-400 line-through py-1">
+                <span>{t.name}</span>
+                <span className="tabnum">{t.plannedMin}分</span>
+              </div>
+            ))}
+          </Collapsible>
+        )}
+
+        {/* 完了タスク（メインから隠す＝折りたたみ） */}
+        {done.length > 0 && (
+          <Collapsible title={`✓ 完了（${done.length}件）`} color="text-emerald-600">
+            {done.map((t) => (
+              <DoneRow key={t.id} task={t} onEdit={() => setModal({ edit: t })} />
+            ))}
+          </Collapsible>
+        )}
+
+        {today.tasks.length === 0 && (
+          <div className="text-center text-slate-400 py-16 text-sm">
+            まだ予定がありません。<br />下のボタンから追加するか、セットメニューで一括展開できます。
+          </div>
+        )}
+      </main>
+
+      {/* 下部アクションバー */}
+      <div className="fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur border-t border-orange-100">
+        <div className="max-w-md mx-auto px-4 py-3 flex gap-2">
+          <button onClick={() => setModal('add')} className="flex-1 bg-orange-500 text-white rounded-xl py-2.5 text-sm font-bold active:scale-95 transition">＋ タスク</button>
+          <button onClick={() => setModal('set')} className="flex-1 bg-amber-100 text-amber-700 rounded-xl py-2.5 text-sm font-bold active:scale-95 transition">セット展開</button>
+          <button onClick={() => setModal('eval')} className="flex-1 bg-emerald-100 text-emerald-700 rounded-xl py-2.5 text-sm font-bold active:scale-95 transition">今日の評価</button>
+        </div>
+      </div>
+
+      {/* モーダル類 */}
+      {modal === 'add' && <AddModal onAdd={(arr) => { addTasks(arr); }} onClose={() => setModal(null)} />}
+      {modal === 'set' && <SetMenuModal setmenus={setmenus} onExpand={(name) => { addTasks(expandSetMenu(setmenus[name])); setModal(null); }} onClose={() => setModal(null)} />}
+      {modal === 'settings' && (
+        <SettingsModal
+          settings={settings} setSettings={setSettings}
+          setmenus={setmenus} setSetmenus={setSetmenus}
+          currentTasks={today.tasks}
+          onClose={() => setModal(null)}
+        />
+      )}
+      {modal === 'eval' && <EvalModal today={today} onSave={(v) => { updateToday((d) => ({ ...d, evaluation: v })); }} onClose={() => setModal(null)} />}
+      {modal && modal.edit && (
+        <EditModal task={modal.edit} onSave={(patch) => { replaceTask(modal.edit.id, patch); setModal(null); }} onClose={() => setModal(null)} />
+      )}
+    </div>
+  );
+}
+
+/* ============================ サブコンポーネント ============================ */
+
+function ProgressBar({ done, total }) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  return (
+    <div className="mt-2">
+      <div className="relative h-3 bg-orange-100 rounded-full overflow-hidden">
+        <div className="absolute inset-y-0 left-0 bg-gradient-to-r from-orange-400 to-amber-400 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+        <div className="absolute -top-0.5 text-xs transition-all duration-500" style={{ left: `calc(${pct}% - 8px)` }}>🧗</div>
+      </div>
+      <div className="text-right text-[10px] text-slate-400 mt-0.5">{done}/{total} 合目</div>
+    </div>
+  );
+}
+
+function CatBadge({ cat }) {
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded border ${CAT_COLOR[cat] || CAT_COLOR['休憩']}`}>{cat}</span>;
+}
+
+function ActiveCard({ task, nowInFrame, onStop, onEdit }) {
+  const elapsedSec = Math.max(0, Math.floor((nowInFrame - task.actualStart) * 60 + (Date.now() / 1000 % 60)));
+  // 経過は分単位ベース（秒は概算）。分:秒で表示
+  const totalSec = Math.max(0, Math.round((nowInFrame - task.actualStart) * 60));
+  const mm = Math.floor(totalSec / 60), ss = totalSec % 60;
+  const over = task.plannedMin > 0 && (nowInFrame - task.actualStart) > task.plannedMin;
+  return (
+    <div className="bg-white rounded-2xl shadow-lg border-2 border-orange-300 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <CatBadge cat={task.cat} />
+        <span className="text-xs text-orange-500 font-bold animate-pulse">● 進行中</span>
+      </div>
+      <div className="text-xl font-bold">{task.name}</div>
+      <div className="text-4xl font-bold tabnum my-2 text-center text-orange-600">{pad(mm)}:{pad(ss)}</div>
+      <div className={`text-center text-xs mb-3 ${over ? 'text-rose-500 font-bold' : 'text-slate-400'}`}>
+        予定 {task.plannedMin}分 {over ? '（超過中！）' : ''}
+      </div>
+      <div className="flex gap-2">
+        <button onClick={onStop} className="flex-1 bg-orange-500 text-white rounded-xl py-3 font-bold active:scale-95 transition">⏹ 終了</button>
+        <button onClick={onEdit} className="px-4 bg-slate-100 text-slate-500 rounded-xl py-3 text-sm">修正</button>
+      </div>
+    </div>
+  );
+}
+
+function NextCard({ task, onStart, onEdit, onRemove }) {
+  return (
+    <div className="bg-white rounded-2xl shadow border border-orange-200 p-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 min-w-0">
+          <CatBadge cat={task.cat} />
+          <span className="font-bold truncate">{task.name}</span>
+        </div>
+        <span className="text-sm text-slate-400 tabnum shrink-0">{task.plannedMin}分</span>
+      </div>
+      <div className="text-xs text-slate-400 mt-1 tabnum">
+        {minToHHMM(Math.round(task.projStart))} 〜 {minToHHMM(Math.round(task.projEnd))} {task.cut && <span className="text-rose-400">（24時で短縮）</span>}
+      </div>
+      {task.type === 'fixed' ? (
+        <div className="mt-3 text-center text-sm text-purple-500 bg-purple-50 rounded-xl py-3">📌 固定予定（タイマーなし）</div>
+      ) : (
+        <div className="flex gap-2 mt-3">
+          <button onClick={onStart} className="flex-1 bg-emerald-500 text-white rounded-xl py-3 font-bold active:scale-95 transition">▶ 開始</button>
+          <button onClick={onEdit} className="px-3 bg-slate-100 text-slate-500 rounded-xl text-sm">修正</button>
+          <button onClick={onRemove} className="px-3 bg-slate-100 text-slate-400 rounded-xl text-sm">削除</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompactRow({ task, onEdit, onRemove }) {
+  return (
+    <div className="flex items-center gap-2 bg-white/70 rounded-lg px-3 py-2 text-sm">
+      <span className="text-[11px] text-slate-400 tabnum w-20 shrink-0">{minToHHMM(Math.round(task.projStart))}〜{minToHHMM(Math.round(task.projEnd))}</span>
+      <CatBadge cat={task.cat} />
+      <span className="truncate flex-1">{task.name}{task.cut && <span className="text-rose-400 text-[10px]">（短縮）</span>}</span>
+      <span className="text-[11px] text-slate-400 tabnum shrink-0">{task.plannedMin}分</span>
+      <button onClick={onEdit} className="text-slate-300 text-xs px-1">✎</button>
+      <button onClick={onRemove} className="text-slate-300 text-xs px-1">✕</button>
+    </div>
+  );
+}
+
+function DoneRow({ task, onEdit }) {
+  const diff = (task.actualMin || 0) - task.plannedMin;
+  return (
+    <div className="flex items-center gap-2 py-1.5 text-sm">
+      <span className="text-[11px] text-slate-400 tabnum w-20 shrink-0">{minToHHMM(Math.round(task.projStart))}〜{minToHHMM(Math.round(task.projEnd))}</span>
+      <CatBadge cat={task.cat} />
+      <span className="truncate flex-1 text-slate-500">{task.name}</span>
+      <span className="text-[11px] tabnum shrink-0 text-emerald-600">{task.actualMin}分
+        {diff !== 0 && <span className={diff > 0 ? 'text-rose-400' : 'text-blue-400'}> ({diff > 0 ? '+' : ''}{diff})</span>}
+      </span>
+      <button onClick={onEdit} className="text-slate-300 text-xs px-1">✎</button>
+    </div>
+  );
+}
+
+function Collapsible({ title, color, children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button onClick={() => setOpen((o) => !o)} className={`text-xs font-semibold ${color} flex items-center gap-1`}>
+        <span>{open ? '▼' : '▶'}</span> {title}
+      </button>
+      {open && <div className="mt-1 pl-1">{children}</div>}
+    </div>
+  );
+}
+
+/* ---- モーダル土台 ---- */
+function ModalShell({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/40" />
+      <div className="relative bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl max-h-[85vh] overflow-y-auto p-5" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-bold">{title}</h2>
+          <button onClick={onClose} className="text-slate-400 text-2xl leading-none">×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AddModal({ onAdd, onClose }) {
+  const [fixedName, setFixedName] = useState('学校');
+  const [fixedStart, setFixedStart] = useState('08:40');
+  const [fixedEnd, setFixedEnd] = useState('14:00');
+  return (
+    <ModalShell title="タスクを追加" onClose={onClose}>
+      {STUDY_MASTER.map((g) => (
+        <div key={g.cat} className="mb-3">
+          <div className="flex items-center gap-2 mb-1"><CatBadge cat={g.cat} /></div>
+          <div className="flex flex-wrap gap-1.5">
+            {g.items.map((it) => (
+              <button key={it.name} onClick={() => onAdd([makeStudyTask(g.cat, it.name, it.min)])}
+                className="text-sm bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 active:bg-orange-50">
+                {it.name} <span className="text-slate-400 text-xs">{it.min}分</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div className="mb-3">
+        <div className="flex items-center gap-2 mb-1"><CatBadge cat="休憩" /></div>
+        <div className="flex flex-wrap gap-1.5">
+          {REST_MASTER.map((m) => (
+            <button key={m} onClick={() => onAdd([makeRestTask(m)])}
+              className="text-sm bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 active:bg-slate-100">休憩 {m}分</button>
+          ))}
+        </div>
+      </div>
+      <div className="border-t pt-3">
+        <div className="flex items-center gap-2 mb-2"><CatBadge cat="固定" /><span className="text-xs text-slate-400">学校・習い事など（タスクはこの時間を避けて配置）</span></div>
+        <input value={fixedName} onChange={(e) => setFixedName(e.target.value)} className="w-full border rounded-lg px-3 py-2 mb-2 text-sm" placeholder="名前（例: 学校）" />
+        <div className="flex items-center gap-2 mb-2">
+          <input type="time" value={fixedStart} onChange={(e) => setFixedStart(e.target.value)} className="border rounded-lg px-2 py-2 text-sm flex-1" />
+          <span className="text-slate-400">〜</span>
+          <input type="time" value={fixedEnd} onChange={(e) => setFixedEnd(e.target.value)} className="border rounded-lg px-2 py-2 text-sm flex-1" />
+        </div>
+        <button onClick={() => onAdd([makeFixedTask(fixedName || '固定予定', hhmmToMin(fixedStart), hhmmToMin(fixedEnd))])}
+          className="w-full bg-purple-500 text-white rounded-lg py-2 text-sm font-bold">固定予定を追加</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function SetMenuModal({ setmenus, onExpand, onClose }) {
+  return (
+    <ModalShell title="セットメニュー展開" onClose={onClose}>
+      <p className="text-xs text-slate-400 mb-3">選ぶと1日分の組み合わせが今日のスケジュール末尾に追加されます。</p>
+      <div className="space-y-2">
+        {Object.keys(setmenus).map((name) => {
+          const total = expandSetMenu(setmenus[name]).reduce((a, t) => a + t.plannedMin, 0);
+          return (
+            <button key={name} onClick={() => onExpand(name)}
+              className="w-full text-left bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 active:scale-95 transition">
+              <div className="font-bold">{name}</div>
+              <div className="text-xs text-slate-400">{setmenus[name].length}ブロック・計{Math.floor(total/60)}時間{total%60}分</div>
+            </button>
+          );
+        })}
+      </div>
+    </ModalShell>
+  );
+}
+
+function EditModal({ task, onSave, onClose }) {
+  const [plannedMin, setPlannedMin] = useState(task.plannedMin);
+  const [startStr, setStartStr] = useState(task.actualStart != null ? minToHHMM(Math.round(task.actualStart % 1440)) : '');
+  const [endStr, setEndStr] = useState(task.actualEnd != null ? minToHHMM(Math.round(task.actualEnd % 1440)) : '');
+  const isDoneOrActive = task.status === 'done' || task.status === 'active';
+
+  const save = () => {
+    const patch = { plannedMin: Number(plannedMin) || task.plannedMin };
+    if (isDoneOrActive) {
+      if (startStr) patch.actualStart = hhmmToMin(startStr);
+      if (endStr)   patch.actualEnd = hhmmToMin(endStr);
+      if (patch.actualStart != null && patch.actualEnd != null) {
+        patch.actualMin = Math.max(1, patch.actualEnd - patch.actualStart);
+      }
+    }
+    onSave(patch);
+  };
+  return (
+    <ModalShell title="タスクを修正" onClose={onClose}>
+      <div className="mb-3"><CatBadge cat={task.cat} /> <span className="font-bold">{task.name}</span></div>
+      <label className="block text-sm mb-3">
+        <span className="text-slate-500">予定時間（分）</span>
+        <input type="number" value={plannedMin} onChange={(e) => setPlannedMin(e.target.value)} className="w-full border rounded-lg px-3 py-2 mt-1" />
+      </label>
+      {isDoneOrActive && (
+        <div className="bg-orange-50 rounded-xl p-3 mb-3">
+          <p className="text-xs text-slate-500 mb-2">⏱ 押し忘れた？ 実際の開始・終了を手で直せます。</p>
+          <div className="flex items-center gap-2">
+            <input type="time" value={startStr} onChange={(e) => setStartStr(e.target.value)} className="border rounded-lg px-2 py-2 text-sm flex-1" />
+            <span className="text-slate-400">〜</span>
+            <input type="time" value={endStr} onChange={(e) => setEndStr(e.target.value)} className="border rounded-lg px-2 py-2 text-sm flex-1" />
+          </div>
+        </div>
+      )}
+      <button onClick={save} className="w-full bg-orange-500 text-white rounded-xl py-3 font-bold">保存</button>
+    </ModalShell>
+  );
+}
+
+function EvalModal({ today, onSave, onClose }) {
+  const [stars, setStars] = useState(today.evaluation?.stars || 0);
+  const [comment] = useState(() => FEEDBACKS[Math.floor(Math.random() * FEEDBACKS.length)]);
+  const [saved, setSaved] = useState(false);
+  const doneMin = today.tasks.filter((t) => t.status === 'done').reduce((a, t) => a + (t.actualMin || 0), 0);
+  return (
+    <ModalShell title="今日の自己評価" onClose={onClose}>
+      <div className="text-center">
+        <p className="text-sm text-slate-500 mb-1">今日の実績</p>
+        <p className="text-2xl font-bold text-orange-600 mb-4">{Math.floor(doneMin/60)}時間{doneMin%60}分</p>
+        <div className="flex justify-center gap-1 mb-4">
+          {[1,2,3,4,5].map((n) => (
+            <button key={n} onClick={() => setStars(n)} className={`text-4xl ${n <= stars ? 'opacity-100' : 'opacity-25'}`}>⭐</button>
+          ))}
+        </div>
+        {!saved ? (
+          <button onClick={() => { onSave({ stars, comment, doneMin }); setSaved(true); }}
+            disabled={stars === 0}
+            className="w-full bg-emerald-500 disabled:opacity-40 text-white rounded-xl py-3 font-bold">記録する</button>
+        ) : (
+          <div className="bg-emerald-50 rounded-2xl p-4 mt-2">
+            <div className="text-4xl mb-2">🏔️</div>
+            <p className="text-emerald-700 font-bold">{comment}</p>
+            <button onClick={onClose} className="mt-3 text-sm text-slate-400 underline">閉じる</button>
+          </div>
+        )}
+      </div>
+    </ModalShell>
+  );
+}
+
+function SettingsModal({ settings, setSettings, setmenus, setSetmenus, currentTasks, onClose }) {
+  const [limit, setLimit] = useState(settings.limit);
+  const [dayStart, setDayStart] = useState(settings.dayStart);
+
+  const saveSettings = () => setSettings({ limit, dayStart });
+
+  // 現在の並びをセットメニューとして保存（confirmed #10: あとで自分で編集）
+  const saveAsSet = (name) => {
+    const def = currentTasks
+      .filter((t) => t.type !== 'fixed')
+      .map((t) => t.type === 'rest' ? { t: 'rest', m: t.plannedMin } : { t: 'study', c: t.cat, n: t.name });
+    if (def.length === 0) { alert('保存するタスクがありません。'); return; }
+    setSetmenus({ ...setmenus, [name]: def });
+    alert(`「${name}」を現在の${def.length}ブロックで上書きしました。`);
+  };
+
+  return (
+    <ModalShell title="設定" onClose={onClose}>
+      <div className="space-y-4">
+        <div>
+          <h3 className="font-bold text-sm mb-2">1日の区切り</h3>
+          <label className="flex items-center justify-between text-sm mb-2">
+            <span className="text-slate-500">開始時刻</span>
+            <input type="time" value={dayStart.padStart(5,'0')} onChange={(e) => setDayStart(e.target.value)} className="border rounded-lg px-2 py-1.5" />
+          </label>
+          <label className="flex items-center justify-between text-sm">
+            <span className="text-slate-500">リミット（これ以降は短縮・消滅）</span>
+            <select value={limit} onChange={(e) => setLimit(e.target.value)} className="border rounded-lg px-2 py-1.5">
+              <option value="24:00">24:00</option>
+              <option value="25:00">25:00（深夜1時）</option>
+              <option value="26:00">26:00（深夜2時）</option>
+              <option value="27:00">27:00（深夜3時）</option>
+            </select>
+          </label>
+          <button onClick={saveSettings} className="w-full bg-orange-500 text-white rounded-lg py-2 text-sm font-bold mt-3">設定を保存</button>
+        </div>
+
+        <div className="border-t pt-4">
+          <h3 className="font-bold text-sm mb-1">セットメニューを編集</h3>
+          <p className="text-xs text-slate-400 mb-2">今日のスケジュールの並び（固定予定を除く）を、選んだセットに上書き保存します。</p>
+          <div className="grid grid-cols-2 gap-2">
+            {Object.keys(setmenus).map((name) => (
+              <button key={name} onClick={() => saveAsSet(name)} className="bg-amber-50 border border-amber-200 rounded-lg py-2 text-xs font-bold">「{name}」に保存</button>
+            ))}
+          </div>
+        </div>
+
+        <div className="border-t pt-4 text-xs text-slate-400">
+          <p>データはこの端末のブラウザ内（localStorage）にのみ保存されます。</p>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
